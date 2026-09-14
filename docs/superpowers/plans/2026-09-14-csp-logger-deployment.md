@@ -136,7 +136,13 @@ APP_NAME="CSP Violation Logger"
 APP_ENV=production
 APP_KEY=
 APP_DEBUG=false
-APP_URL=https://${APP_DOMAIN}
+# Full URL, e.g. https://csp-logger.example.com — must match APP_DOMAIN
+# below (with the https:// prefix). Set as a literal value, not a
+# ${APP_DOMAIN} reference: Docker's env_file mechanism (used to inject
+# this file into the app/horizon/scheduler containers) does not expand
+# ${...} placeholders inside .env values, so a reference here would
+# reach the containers as the literal unexpanded string.
+APP_URL=
 
 APP_LOCALE=en
 APP_FALLBACK_LOCALE=en
@@ -175,10 +181,10 @@ REDIS_HOST=redis
 REDIS_PASSWORD=null
 REDIS_PORT=6379
 
-# Domain this app is served on. Consumed both by Caddy (docker/caddy/Caddyfile,
-# via Caddy's own env-var resolution) and by APP_URL above (via Compose's
-# automatic loading of this file for ${...} substitution, since this file is
-# named .env at the same location docker-compose.prod.yml expects it).
+# Domain this app is served on (no scheme, e.g. csp-logger.example.com).
+# Consumed by Caddy (docker/caddy/Caddyfile), which resolves {$APP_DOMAIN}
+# from its own container's environment at runtime. Must match the domain
+# used in APP_URL above.
 APP_DOMAIN=
 ```
 
@@ -225,6 +231,7 @@ Edit `.env` and fill in test values for local verification:
 DB_DATABASE=csp_logger
 DB_USERNAME=csp_logger
 DB_PASSWORD=test-local-password
+APP_URL=https://localhost
 APP_DOMAIN=localhost
 ```
 
@@ -667,8 +674,11 @@ first real deploy, not a task with a pass/fail check:
 1. Provision the server, install Docker + Docker Compose.
 2. Clone the repo.
 3. Copy `.env.production.example` to `.env`; fill in `DB_DATABASE`,
-   `DB_USERNAME`, a real `DB_PASSWORD`, and `APP_DOMAIN` (the real
-   public domain this time, not `localhost`). Leave `APP_KEY` blank.
+   `DB_USERNAME`, a real `DB_PASSWORD`, `APP_DOMAIN` (the real public
+   domain, not `localhost`), and `APP_URL` (`https://` + that same
+   domain — set as a literal value, since `${APP_DOMAIN}`-style
+   references inside `.env` do not get expanded when Docker injects
+   this file into the containers). Leave `APP_KEY` blank.
 4. Point the domain's DNS at the server.
 5. `docker compose -f docker-compose.prod.yml build`, then
    `docker compose -f docker-compose.prod.yml run --rm app php artisan key:generate --show`
