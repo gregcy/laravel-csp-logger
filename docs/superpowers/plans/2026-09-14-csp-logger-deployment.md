@@ -187,10 +187,10 @@ APP_DOMAIN=
 - [ ] **Step 2: Verify no real secrets are present**
 
 ```bash
-grep -E "PASSWORD=.+|APP_KEY=.+" .env.production.example
+grep -E "^(DB_PASSWORD|APP_KEY)=.+" .env.production.example
 ```
 
-Expected: no output (both `DB_PASSWORD=` and `APP_KEY=` are blank — this is a template, not a real `.env`).
+Expected: no output (both `DB_PASSWORD=` and `APP_KEY=` are blank — this is a template, not a real `.env`). Anchoring to the start of the line and naming the two fields explicitly avoids a false positive on `REDIS_PASSWORD=null`, which is a legitimate placeholder value (matching the dev `.env.example`'s own convention for "no Redis password configured"), not a secret.
 
 - [ ] **Step 3: Commit**
 
