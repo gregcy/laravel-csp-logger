@@ -674,11 +674,21 @@ first real deploy, not a task with a pass/fail check:
 1. Provision the server, install Docker + Docker Compose.
 2. Clone the repo.
 3. Copy `.env.production.example` to `.env`; fill in `DB_DATABASE`,
-   `DB_USERNAME`, a real `DB_PASSWORD`, `APP_DOMAIN` (the real public
+   `DB_USERNAME`, a real `DB_PASSWORD`, a real `MYSQL_ROOT_PASSWORD`
+   (a separate value from `DB_PASSWORD` — it's the MySQL server's root
+   credential, not the application's), `APP_DOMAIN` (the real public
    domain, not `localhost`), and `APP_URL` (`https://` + that same
    domain — set as a literal value, since `${APP_DOMAIN}`-style
    references inside `.env` do not get expanded when Docker injects
-   this file into the containers). Leave `APP_KEY` blank.
+   this file into the containers). Leave `APP_KEY` blank. For
+   `DB_PASSWORD` and `MYSQL_ROOT_PASSWORD` specifically, use a purely
+   alphanumeric password (e.g. `openssl rand -hex 24`) — these values
+   are consumed both via Docker Compose's `${VAR}` YAML interpolation
+   (in the `mysql` service's `environment:` and healthcheck) and via
+   literal `env_file:` injection into `app`/`horizon`/`scheduler`, and
+   characters like `$`, `#`, or unquoted spaces can be interpreted
+   differently by the two mechanisms, causing the app and database to
+   silently disagree about the password.
 4. Point the domain's DNS at the server.
 5. `docker compose -f docker-compose.prod.yml build`, then
    `docker compose -f docker-compose.prod.yml run --rm app php artisan key:generate --show`

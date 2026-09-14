@@ -15,3 +15,8 @@ README.md
 .editorconfig
 .gitattributes
 .gitignore
+.superpowers
+phpunit.xml
+package.json
+vite.config.js
+storage/logs/*.log
