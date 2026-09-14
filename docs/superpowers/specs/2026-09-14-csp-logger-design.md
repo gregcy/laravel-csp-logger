@@ -30,10 +30,14 @@ Browser (any registered site, CSP in report-only mode)
    ▼
 Route: POST /csp-report (routes/api.php — unauthenticated, no CSRF)
    │  throttle middleware (e.g. 120 req/min per IP) as a basic abuse guard
+   │  CORS: Access-Control-Allow-Origin: * (see Routing & CORS below)
    ▼
 CspReportController@store
    │  Reads raw body + Content-Type, dispatches ProcessCspReportJob(rawBody, contentType)
    │  Responds 204 No Content immediately — no parsing or DB work in the request path
+   │  Dispatch failures (e.g. Redis unreachable) are NOT caught — they surface as a
+   │  500 (browsers ignore the response either way) so an outage is loud in logs
+   │  instead of silently dropping reports
    ▼
 Redis queue ("csp-reports") — durable buffer, survives DB slowness/outages and deploys
    ▼
@@ -41,7 +45,9 @@ Horizon-managed worker → ProcessCspReportJob::handle()
    │  1. Detect format from Content-Type and normalize into a common set of fields
    │     (legacy: single `csp-report` object; Reporting API: array of reports,
    │     only entries with type === "csp-violation" are processed, others ignored)
-   │  2. Extract hostname from document-uri/url (case-insensitive, port stripped)
+   │  2. Extract hostname from document-uri/url, lowercased explicitly in code
+   │     (not relied on DB collation), port stripped. If no usable hostname can be
+   │     extracted at all, log a warning and discard — nothing to key a row on.
    │  3. Look up an *active* Site by exact hostname match:
    │       - match found  → atomic upsert into csp_violations (increment counter)
    │       - no match     → atomic upsert into unauthorized_report_domains
@@ -57,6 +63,30 @@ Filament admin panel (single admin user)
 
 A daily scheduled command prunes `csp_violations` rows whose
 `last_seen_at` is older than 30 days.
+
+## Routing & CORS
+
+CSP's two reporting mechanisms differ in CORS behavior:
+
+- **Legacy `report-uri`** is exempt from CORS entirely — no preflight,
+  no headers required, regardless of the target origin.
+- **Reporting API (`report-to`)** does require CORS: browsers send an
+  `OPTIONS` preflight and require `Access-Control-Allow-Origin` (etc.)
+  in the response before the report POST is accepted.
+
+Since the endpoint accepts both formats, it must answer preflights with
+`Access-Control-Allow-Origin: *` (wide open — the endpoint returns
+nothing sensitive, and already accepts writes from unregistered domains
+by design; restricting the origin would require a `sites` lookup on
+every preflight, reintroducing a DB read into the fast request path).
+
+Laravel 11/12 no longer include `routes/api.php` by default (removed
+from the skeleton; restoring it via `php artisan install:api` also
+pulls in unwanted Sanctum scaffolding). This app adds a minimal
+`routes/api.php` by hand, wired into `bootstrap/app.php` via
+`withRouting(api: ...)`, without running `install:api` — keeping
+`/csp-report` naturally outside the `web` middleware group (no
+session/CSRF) without unused auth machinery.
 
 ## Domain Authorization Model
 
@@ -76,6 +106,14 @@ auto-registration:
   real `Site` via a "Register as Site" action. This only affects
   future reports — the historical unauthorized entry is not
   retroactively migrated into `csp_violations`.
+- Hostnames are explicitly lowercased in application code (both when
+  registering a `Site` and when matching an incoming report) rather
+  than relying on the database column's collation to make comparisons
+  case-insensitive.
+- Deactivating a `Site` (`is_active = false`) only changes where
+  *future* reports land (redirected to `unauthorized_report_domains`).
+  Its existing historical rows in `csp_violations` stay untouched and
+  visible in the admin panel — deactivation is not retroactive.
 
 ## Data Model
 
@@ -83,7 +121,7 @@ auto-registration:
 | column | type | notes |
 |---|---|---|
 | id | bigint pk | |
-| domain | string, unique | exact hostname, case-insensitive |
+| domain | string, unique | exact hostname, stored lowercased |
 | name | string, nullable | friendly label |
 | is_active | boolean, default true | inactive sites' reports are treated as unauthorized |
 | timestamps | | |
@@ -138,17 +176,23 @@ Same atomic-upsert approach as `csp_violations`.
 
 ## Filament Admin Panel
 
-Single admin user (no roles/multi-tenancy needed).
+Single admin user (no roles/multi-tenancy needed), created via a
+one-time interactive `php artisan make:filament-user` during setup
+(no seeder, credentials never touch the repo).
 
 1. **SiteResource** — manage the registry: create/edit `domain`, `name`,
    `is_active`. List shows a live violation count per site
    (`withCount`).
 2. **CspViolationResource** — the main working view, default sorted by
    `last_seen_at` desc.
-   - Filters: Site (select), `effective_directive` (select, built from
-     distinct values actually present in the data, not a hardcoded
-     list), `disposition` (select), `blocked_uri` (text contains
-     search), date range on `last_seen_at`.
+   - Filters: Site (select), `effective_directive` (select, a static
+     hardcoded list of standard CSP directives — `script-src`,
+     `style-src`, `img-src`, `connect-src`, `font-src`, `frame-src`,
+     `object-src`, `media-src`, `worker-src`, `form-action`,
+     `base-uri`, `frame-ancestors`, etc. — rather than a live `DISTINCT`
+     query, since the directive set is small and effectively fixed,
+     unlike `blocked_uri`), `disposition` (select), `blocked_uri` (text
+     contains search), date range on `last_seen_at`.
    - A view page/modal renders the stored `raw_sample` JSON for full
      detail on any one violation.
 3. **UnauthorizedDomainResource** — review queue for unrecognized
@@ -163,9 +207,10 @@ violations to determine a policy.
 
 ## Queue / Horizon
 
-- Single Horizon supervisor for the `csp-reports` queue, `balance=auto`
-  so worker count scales with backlog (absorbs bursts, e.g. a broken
-  deploy causing a spike in violations).
+- Single Horizon supervisor for the `csp-reports` queue, `balance=auto`,
+  `minProcesses=1`, `maxProcesses=10` — a starting point sized for
+  ~500k pageviews/month (roughly 12/min average) with headroom for
+  bursts, easily tuned later from real Horizon metrics.
 - Horizon dashboard (`/horizon`) gated via `Horizon::auth`, restricted
   to the authenticated admin user (same guard as Filament).
 - Redis is the queue backend (`QUEUE_CONNECTION=redis`).
@@ -179,12 +224,19 @@ audit trail — can revisit if it grows unexpectedly).
 
 ## Error Handling Summary
 
-- Ingestion endpoint always returns `204 No Content`, regardless of
-  payload validity — CSP reporting is fire-and-forget, browsers do
-  nothing with the response, and returning errors provides no value
-  while adding complexity.
-- Malformed/unparseable report bodies: logged as a warning, job
-  completes successfully, no retry.
+- Ingestion endpoint always returns `204 No Content` once a report is
+  successfully queued, regardless of payload validity — CSP reporting
+  is fire-and-forget, browsers do nothing with the response, and
+  returning errors for bad payloads provides no value while adding
+  complexity.
+- A failure to *queue* the report at all (e.g. Redis is unreachable) is
+  not caught in the controller — it surfaces as a `500`. Browsers
+  ignore the response either way, so there's no user-facing cost, and
+  this ensures a queue outage is loud in logs/error tracking rather
+  than silently dropping reports with no trace.
+- Malformed/unparseable report bodies, or bodies with no usable
+  hostname to extract: logged as a warning, job completes successfully,
+  no retry, nothing written to any table.
 - Reporting API entries with a `type` other than `csp-violation` are
   silently ignored (out of scope for this app).
 - Genuine transient failures (e.g. DB connection errors during upsert):
@@ -197,12 +249,17 @@ audit trail — can revisit if it grows unexpectedly).
   - Reporting API format, single and batched reports, known domain → same
   - either format, unknown domain → row created/incremented in `unauthorized_report_domains`
   - malformed JSON → still responds 204, no rows created, warning logged
+  - valid JSON with no usable hostname (missing document-uri/url) → 204, no rows created, warning logged
   - repeat identical violation → `occurrence_count` increments, `last_seen_at` updates, `first_seen_at` unchanged
+  - a deactivated site's report → row created/incremented in `unauthorized_report_domains`, not `csp_violations`
+  - `OPTIONS` preflight on `/csp-report` → CORS headers present, wide open origin
+  - queue backend unreachable → request surfaces a `500`, no silent swallow
 - Unit tests:
   - report normalizer (both formats → common internal representation)
-  - domain extraction/matching (case-insensitivity, port stripping, exact-match-only semantics)
+  - domain extraction/matching (explicit lowercasing, port stripping, exact-match-only semantics)
 - Filament tests:
   - "Register as Site" action on UnauthorizedDomainResource creates the expected `Site`
   - CspViolationResource filters (site, directive, disposition, blocked_uri, date range) narrow results as expected
+  - deactivating a `Site` leaves its existing `csp_violations` rows visible in the resource
 - Scheduled command test: prune removes `csp_violations` rows past the
   30-day retention window and leaves newer rows untouched.
