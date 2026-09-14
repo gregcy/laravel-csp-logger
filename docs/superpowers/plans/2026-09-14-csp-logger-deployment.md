@@ -64,7 +64,7 @@ Create `Dockerfile` at the repo root:
 FROM serversideup/php:8.4-fpm-nginx AS base
 
 USER root
-RUN install-php-extensions redis
+RUN install-php-extensions redis intl
 
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
@@ -80,7 +80,7 @@ RUN composer install --no-dev --optimize-autoloader --no-interaction --no-progre
 USER www-data
 ```
 
-The `redis` PHP extension (phpredis) is installed explicitly because the app's `.env` configures `REDIS_CLIENT=phpredis`, and the base image doesn't bundle it by default the way the Sail dev image does.
+The `redis` PHP extension (phpredis) is installed explicitly because the app's `.env` configures `REDIS_CLIENT=phpredis`, and the base image doesn't bundle it by default the way the Sail dev image does. `intl` is required by `filament/support` (a hard `ext-intl` requirement in its `composer.json`) — without it, `composer install` fails outright.
 
 - [ ] **Step 3: Build the image**
 
@@ -108,7 +108,7 @@ Expected: `NOT FOUND (good)` — confirms `--no-dev` actually excluded PHPUnit.
 docker run --rm csp-logger-app:test php -m
 ```
 
-Expected: the module list includes `redis` — confirms the extension installed correctly.
+Expected: the module list includes both `redis` and `intl` — confirms both extensions installed correctly (`intl` is a hard requirement of `filament/support`; without it `composer install` fails before this step is ever reached).
 
 - [ ] **Step 5: Commit**
 
