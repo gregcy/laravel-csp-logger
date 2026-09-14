@@ -27,13 +27,13 @@ class CspViolationRecorder
             [
                 $site->id,
                 (string) $report->effectiveDirective,
-                (string) $report->blockedUri,
-                $report->sourceFile ?? '',
+                mb_substr((string) $report->blockedUri, 0, 255),
+                mb_substr($report->sourceFile ?? '', 0, 255),
                 $report->lineNumber ?? 0,
                 $report->columnNumber ?? 0,
                 (string) $report->disposition,
-                (string) $report->documentUri,
-                $report->referrer,
+                mb_substr((string) $report->documentUri, 0, 255),
+                $report->referrer !== null ? mb_substr($report->referrer, 0, 255) : null,
                 $report->statusCode,
                 $report->originalPolicy,
                 $report->scriptSample,
@@ -62,7 +62,7 @@ class CspViolationRecorder
                 updated_at = VALUES(updated_at)
             SQL,
             [
-                $domain,
+                mb_substr($domain, 0, 255),
                 $now,
                 $now,
                 json_encode($report->raw),

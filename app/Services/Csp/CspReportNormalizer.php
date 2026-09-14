@@ -47,7 +47,8 @@ class CspReportNormalizer
             documentUri: $report['document-uri'] ?? null,
             referrer: $report['referrer'] ?? null,
             violatedDirective: $report['violated-directive'] ?? null,
-            effectiveDirective: $report['effective-directive'] ?? $report['violated-directive'] ?? null,
+            effectiveDirective: $report['effective-directive']
+                ?? (isset($report['violated-directive']) ? strtok($report['violated-directive'], ' ') : null),
             originalPolicy: $report['original-policy'] ?? null,
             disposition: $report['disposition'] ?? null,
             blockedUri: $report['blocked-uri'] ?? null,

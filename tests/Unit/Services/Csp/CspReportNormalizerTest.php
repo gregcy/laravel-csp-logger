@@ -47,6 +47,23 @@ class CspReportNormalizerTest extends TestCase
         $this->assertSame('https://example.com/page', $report->sourceFile);
     }
 
+    public function test_legacy_falls_back_to_bare_directive_name_from_violated_directive(): void
+    {
+        $body = json_encode([
+            'csp-report' => [
+                'document-uri' => 'https://example.com/page',
+                'violated-directive' => "script-src 'self' https://cdn.example",
+                'blocked-uri' => 'https://evil.example/script.js',
+                'disposition' => 'report',
+            ],
+        ]);
+
+        $reports = $this->normalizer->normalize($body, 'application/csp-report');
+
+        $this->assertCount(1, $reports);
+        $this->assertSame('script-src', $reports[0]->effectiveDirective);
+    }
+
     public function test_parses_reporting_api_single_report(): void
     {
         $body = json_encode([[
