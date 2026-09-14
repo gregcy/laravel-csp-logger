@@ -96,17 +96,26 @@ Six services:
 
 | Service | Image | Role |
 |---|---|---|
-| `app` | built from repo `Dockerfile` | Serves web traffic (nginx + php-fpm) on internal port 8080 |
-| `horizon` | same built image | `command: ["php", "/var/www/html/artisan", "horizon"]`; `stop_signal: SIGTERM`; `healthcheck: healthcheck-horizon` |
-| `scheduler` | same built image | `command: ["php", "/var/www/html/artisan", "schedule:work"]`; `stop_signal: SIGTERM`; `healthcheck: healthcheck-schedule` |
-| `mysql` | `mysql:8.4` | Persistent volume `mysql_data` |
-| `redis` | `redis:7-alpine` | `command: redis-server --appendonly yes`; persistent volume `redis_data` |
+| `app` | built from repo `Dockerfile` | Serves web traffic (nginx + php-fpm) on internal port 8080; `depends_on: mysql (healthy), redis (healthy)` |
+| `horizon` | same built image | `command: ["php", "/var/www/html/artisan", "horizon"]`; `stop_signal: SIGTERM`; `healthcheck: healthcheck-horizon`; `depends_on: mysql (healthy), redis (healthy)` |
+| `scheduler` | same built image | `command: ["php", "/var/www/html/artisan", "schedule:work"]`; `stop_signal: SIGTERM`; `healthcheck: healthcheck-schedule`; `depends_on: mysql (healthy), redis (healthy)` |
+| `mysql` | `mysql:8.4` | Persistent volume `mysql_data`; `healthcheck: mysqladmin ping` |
+| `redis` | `redis:7-alpine` | `command: redis-server --appendonly yes`; persistent volume `redis_data`; `healthcheck: redis-cli ping` |
 | `caddy` | `caddy:2-alpine` | Publishes `80`/`443`; mounts `docker/caddy/Caddyfile`; persistent volumes `caddy_data`/`caddy_config` |
 
 All six services share one internal Docker network. `app`, `horizon`,
 and `scheduler` additionally share a named volume `app_storage` mounted
 at `/var/www/html/storage`, so logs and framework cache stay consistent
-regardless of which container writes them.
+regardless of which container writes them. (This volume starts empty;
+Docker automatically copies the image's existing `storage/` contents —
+the required `framework/cache`, `framework/sessions`, `framework/views`,
+and `logs` subdirectory skeleton — into it the first time it's mounted,
+so no separate init step is needed.)
+
+`mysql`'s and `redis`'s health checks exist specifically so `app`,
+`horizon`, and `scheduler` don't start (and so `deploy.sh`'s migration
+step doesn't run) against a database that hasn't finished its
+first-time initialization yet — see the Deploy Workflow section.
 
 ## Caddy Configuration
 
@@ -124,18 +133,26 @@ certificate management.
 
 ## Secrets & Environment
 
-A plain `.env` file on the server, mounted (or copied in at deploy
-time) into the `app`, `horizon`, and `scheduler` services — the same
-pattern used by the existing dev setup, and standard for a single-node
-Compose deployment (Docker secrets / Swarm would be unnecessary
-complexity here). The real `.env` is never committed.
+A plain `.env` file on the server. Every service that needs a value
+from it declares `env_file: .env` in `docker-compose.prod.yml` —
+`app`, `horizon`, and `scheduler` (for the full Laravel configuration)
+**and `caddy`** (specifically for `APP_DOMAIN`, which the Caddyfile
+resolves via `{$APP_DOMAIN}`). `env_file:` is the standard Compose
+mechanism for this: it requires no bind-mount and keeps `docker compose
+run` (used for one-off commands like migrations) automatically
+consistent with the long-running services, since they all read from
+the same declared source. The real `.env` is never committed, and is
+never `COPY`'d into the image during build (which would bake secrets
+into an image layer).
 
 `.env.production.example` is added alongside the existing dev
 `.env.example`, documenting the production-specific values:
 `APP_ENV=production`, `APP_DEBUG=false`, `DB_HOST=mysql`,
 `REDIS_HOST=redis`, `QUEUE_CONNECTION=redis`, `CACHE_STORE=redis`,
 `APP_DOMAIN=` (consumed by the Caddyfile), plus the existing app's
-required values (`DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD`, `APP_KEY`).
+required values (`DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD`, `APP_KEY`
+— see the Deploy Workflow section for how `APP_KEY` is actually
+generated on a fresh server).
 
 `config/horizon.php`'s existing `production` supervisor block (built as
 part of the original application) is what Horizon reads once
@@ -151,28 +168,44 @@ set -euo pipefail
 
 git pull
 docker compose -f docker-compose.prod.yml build
+docker compose -f docker-compose.prod.yml up -d --wait mysql redis
 docker compose -f docker-compose.prod.yml run --rm app php artisan migrate --force
 docker compose -f docker-compose.prod.yml up -d
 ```
 
 Migrations run explicitly, once per deploy, as their own step —
 matching the earlier decision to avoid auto-migrating on every
-container boot. Since `up -d` recreates any container whose image
-changed, `horizon` and `scheduler` automatically restart with the new
-code; no separate restart step is needed.
+container boot. `mysql` and `redis` are brought up first, and `up -d
+--wait` blocks until their health checks (defined in
+`docker-compose.prod.yml`, see the service table above) report
+healthy, so the migration step never races a MySQL instance that's
+still doing its first-time initialization on a fresh volume. Since `up
+-d` recreates any container whose image changed, `horizon` and
+`scheduler` automatically restart with the new code; no separate
+restart step is needed.
 
 **One-time setup steps** (documented in the repo, not scripted):
 1. Provision the server, install Docker + Docker Compose.
-2. Clone the repo, create `.env` from `.env.production.example`, fill
-   in real secrets (`APP_KEY` via `php artisan key:generate --show`,
-   DB credentials, `APP_DOMAIN`).
-3. Point the domain's DNS at the server.
-4. Run `deploy.sh` for the first time.
-5. Create the admin user: `docker compose -f docker-compose.prod.yml
+2. Clone the repo.
+3. Copy `.env.production.example` to `.env` and fill in what can be
+   known up front: DB credentials, `APP_DOMAIN`. Leave `APP_KEY` blank
+   for now — it can't be generated until the image exists (see step 5).
+4. Point the domain's DNS at the server.
+5. Build the image, then generate the app key using it (a throwaway
+   container needs no `APP_KEY` to already be set to run this command):
+   ```bash
+   docker compose -f docker-compose.prod.yml build
+   docker compose -f docker-compose.prod.yml run --rm app php artisan key:generate --show
+   ```
+   Paste the printed value into `.env` as `APP_KEY=`.
+6. Run `deploy.sh` for the first time (it rebuilds, which is a no-op
+   since nothing changed, then brings up the full stack per the
+   sequence above).
+7. Create the admin user: `docker compose -f docker-compose.prod.yml
    exec app php artisan make:filament-user` — this remains a manual,
    interactive step, never automated, consistent with how the
    application's admin user was always intended to be created.
-6. Register the reporting sites via the Filament admin panel
+8. Register the reporting sites via the Filament admin panel
    (`SiteResource`), per the existing application design.
 
 ## Testing / Verification Plan
