@@ -26,6 +26,7 @@ class ProcessCspReportJob implements ShouldQueue
         public readonly string $rawBody,
         public readonly ?string $contentType,
     ) {
+        $this->queue = 'csp-reports';
     }
 
     public function handle(CspReportNormalizer $normalizer, CspViolationRecorder $recorder): void
