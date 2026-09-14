@@ -12,7 +12,6 @@ COPY --chown=www-data:www-data . .
 
 USER root
 RUN composer install --no-dev --optimize-autoloader --no-interaction --no-progress \
-    && php artisan horizon:publish \
     && chown -R www-data:www-data storage bootstrap/cache
 
 USER www-data
