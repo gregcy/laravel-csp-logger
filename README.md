@@ -1,59 +1,85 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# CSP Violation Logger
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+A Laravel + Filament application that ingests Content-Security-Policy (CSP)
+violation reports from a set of websites running CSP in report-only mode,
+aggregates them with occurrence counts, and exposes a filterable admin panel
+to help determine what CSP policy can safely be enforced.
 
-## About Laravel
+## Design docs
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+Full design and build history lives in `docs/superpowers/`:
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+- [Application design spec](docs/superpowers/specs/2026-09-14-csp-logger-design.md)
+- [Production deployment design spec](docs/superpowers/specs/2026-09-14-csp-logger-production-deployment-design.md)
+- [Application implementation plan](docs/superpowers/plans/2026-09-14-csp-logger.md)
+- [Deployment implementation plan](docs/superpowers/plans/2026-09-14-csp-logger-deployment.md) (includes the full production runbook)
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+## Architecture
 
-## Learning Laravel
+- **Ingestion:** `POST /csp-report` accepts both the legacy `report-uri` and
+  modern Reporting API formats, queues a job, and returns `204` immediately
+  — no parsing or database work happens in the request path.
+- **Processing:** A Redis-backed queue (managed by Laravel Horizon) parses
+  each report, matches its domain against a `sites` allowlist (exact
+  hostname match), and atomically upserts an aggregated row in
+  `csp_violations` — or `unauthorized_report_domains` if the domain isn't
+  registered.
+- **Admin panel:** Filament resources at `/admin` for managing registered
+  sites, filtering violations (by site, directive, disposition, blocked
+  URI, date range), and reviewing/promoting unauthorized domains.
+- **Stack:** Laravel 12, Filament 5, Laravel Horizon, MySQL, Redis.
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework. You can also check out [Laravel Learn](https://laravel.com/learn), where you will be guided through building a modern Laravel application.
+## Local development
 
-If you don't feel like reading, [Laracasts](https://laracasts.com) can help. Laracasts contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+Uses [Laravel Sail](https://laravel.com/docs/sail):
 
-## Laravel Sponsors
+```bash
+composer install
+cp .env.example .env
+php artisan key:generate
+./vendor/bin/sail up -d
+./vendor/bin/sail artisan migrate
+./vendor/bin/sail artisan make:filament-user
+```
 
-We would like to extend our thanks to the following sponsors for funding Laravel development. If you are interested in becoming a sponsor, please visit the [Laravel Partners program](https://partners.laravel.com).
+Then visit `http://localhost/admin`, register a site via the Sites
+resource, and post a sample CSP report to `http://localhost/csp-report` to
+see it land in the violations table. Horizon's dashboard is at
+`http://localhost/horizon`.
 
-### Premium Partners
+Run tests:
 
-- **[Vehikl](https://vehikl.com)**
-- **[Tighten Co.](https://tighten.co)**
-- **[Kirschbaum Development Group](https://kirschbaumdevelopment.com)**
-- **[64 Robots](https://64robots.com)**
-- **[Curotec](https://www.curotec.com/services/technologies/laravel)**
-- **[DevSquad](https://devsquad.com/hire-laravel-developers)**
-- **[Redberry](https://redberry.international/laravel-development)**
-- **[Active Logic](https://activelogic.com)**
+```bash
+./vendor/bin/sail artisan test
+```
 
-## Contributing
+## Production deployment
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+A self-contained Docker Compose stack (`docker-compose.prod.yml`) with
+automatic HTTPS via Caddy. Full first-time setup is documented in the
+Production Runbook section of the
+[deployment plan](docs/superpowers/plans/2026-09-14-csp-logger-deployment.md).
+Summary:
 
-## Code of Conduct
+1. Provision a server with Docker + Docker Compose installed.
+2. Clone this repo, copy `.env.production.example` to `.env`, and fill in
+   DB credentials (`DB_PASSWORD` and `MYSQL_ROOT_PASSWORD` as two
+   *separate* alphanumeric values), `APP_DOMAIN`, and `APP_URL` (as a
+   literal `https://` + domain — leave `APP_KEY` blank for now).
+3. Point the domain's DNS at the server.
+4. `docker compose -f docker-compose.prod.yml build`, then generate
+   `APP_KEY` via
+   `docker compose -f docker-compose.prod.yml run --rm app php artisan key:generate --show`
+   and paste it into `.env`.
+5. `./deploy.sh` — builds, waits for MySQL/Redis to be healthy, migrates,
+   then brings up the full stack.
+6. `docker compose -f docker-compose.prod.yml exec app php artisan make:filament-user`
+   to create the admin account.
+7. Log into `https://<domain>/admin` and register your reporting sites.
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
-
-## Security Vulnerabilities
-
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+Every subsequent deploy is just `./deploy.sh`.
 
 ## License
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+The Laravel framework is open-sourced software licensed under the
+[MIT license](https://opensource.org/licenses/MIT).
