@@ -23,6 +23,7 @@ class UnauthorizedReportDomainResource extends Resource
     {
         return $table
             ->defaultSort('last_seen_at', 'desc')
+            ->defaultPaginationPageOption(50)
             ->columns([
                 TextColumn::make('domain')->searchable()->sortable(),
                 TextColumn::make('occurrence_count')->label('Count')->sortable(),

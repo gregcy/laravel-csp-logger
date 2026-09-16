@@ -47,6 +47,7 @@ class CspViolationResource extends Resource
     {
         return $table
             ->defaultSort('last_seen_at', 'desc')
+            ->defaultPaginationPageOption(50)
             ->columns([
                 TextColumn::make('site.domain')->label('Site')->sortable()->searchable(),
                 TextColumn::make('effective_directive')->label('Directive')->sortable(),

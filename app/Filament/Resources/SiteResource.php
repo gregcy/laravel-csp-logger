@@ -36,6 +36,7 @@ class SiteResource extends Resource
     public static function table(Table $table): Table
     {
         return $table
+            ->defaultPaginationPageOption(50)
             ->columns([
                 TextColumn::make('domain')->searchable()->sortable(),
                 TextColumn::make('name'),
