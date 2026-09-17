@@ -39,7 +39,15 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
-    mem_limit: 128m
+    mem_limit: 256m
+    mem_swappiness: 0
+    environment:
+      # PHP-FPM defaults to pm.max_children=20 and a fixed 128MB OPcache
+      # segment, which together can exceed this container's memory limit
+      # under a burst and OOM-kill php-fpm workers in a loop. Capped to fit
+      # comfortably within mem_limit for this app's real traffic volume.
+      PHP_FPM_PM_MAX_CHILDREN: 5
+      PHP_OPCACHE_MEMORY_CONSUMPTION: 32
     env_file:
       - .env
     depends_on:
