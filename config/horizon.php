@@ -219,7 +219,7 @@ return [
                 'queue' => ['csp-reports'],
                 'balance' => 'auto',
                 'minProcesses' => 1,
-                'maxProcesses' => 10,
+                'maxProcesses' => 2,
                 'tries' => 3,
             ],
         ],
