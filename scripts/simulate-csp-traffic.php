@@ -11,20 +11,31 @@
  * realistic violations, compressed into a short time window so results show
  * up in Filament immediately instead of trickling in over a real month.
  *
+ * By default this spreads a whole simulated month of traffic across
+ * --minutes, which is a very different (and far harsher) thing than real
+ * traffic: compressing e.g. 10,000 reports/month into 15 real minutes
+ * multiplies the true average req/s by roughly (seconds/month / 900) -
+ * order of 1000-3000x. Pass --peak-hour to simulate a single realistic
+ * busy hour instead (a multiple of the flat hourly average, not the whole
+ * month), which is a much more representative load to test against.
+ *
  * Usage:
  *   php scripts/simulate-csp-traffic.php [options]
  *
  * Options:
- *   --url=URL           Ingestion endpoint (default: https://csp.greg.cy/csp-report)
- *   --host=HOST         Hostname to put in document-uri/documentURL (default: localhost)
- *                        Must exactly match an active Site's registered domain.
- *   --hits=N            Monthly page-hit volume to base the simulation on (default: 500000)
- *   --report-rate=F     Fraction of hits that produce a CSP report, 0-1 (default: 0.02)
- *   --minutes=N         Compress the simulated month into this many minutes (default: 15)
- *   --concurrency=N     Max in-flight requests (default: 10)
- *   --reporting-api=F   Fraction of requests sent as Reporting API vs legacy, 0-1 (default: 0.3)
- *   --dry-run           Print sample payloads instead of sending any requests
- *   --help              Show this message
+ *   --url=URL             Ingestion endpoint (default: https://csp.greg.cy/csp-report)
+ *   --host=HOST           Hostname to put in document-uri/documentURL (default: localhost)
+ *                          Must exactly match an active Site's registered domain.
+ *   --hits=N              Monthly page-hit volume to base the simulation on (default: 500000)
+ *   --report-rate=F       Fraction of hits that produce a CSP report, 0-1 (default: 0.02)
+ *   --minutes=N           Compress the simulated window into this many minutes (default: 15)
+ *   --concurrency=N       Max in-flight requests (default: 10)
+ *   --reporting-api=F     Fraction of requests sent as Reporting API vs legacy, 0-1 (default: 0.3)
+ *   --peak-hour           Simulate one busy hour's worth of traffic instead of a whole month
+ *   --peak-factor=F       Peak hour's multiple of the flat hourly average (default: 2.0)
+ *   --days-per-month=N    Days/month used to derive the flat hourly average (default: 30)
+ *   --dry-run             Print sample payloads instead of sending any requests
+ *   --help                Show this message
  */
 
 function usage(): never
@@ -32,16 +43,19 @@ function usage(): never
     fwrite(STDERR, <<<'TXT'
 Usage: php scripts/simulate-csp-traffic.php [options]
 
-  --url=URL           Ingestion endpoint (default: https://csp.greg.cy/csp-report)
-  --host=HOST         Hostname for document-uri (default: localhost) - must match
-                       an active Site's registered domain exactly
-  --hits=N            Monthly page-hit volume to base the simulation on (default: 500000)
-  --report-rate=F     Fraction of hits producing a report, 0-1 (default: 0.02)
-  --minutes=N         Compress the simulated month into this many minutes (default: 15)
-  --concurrency=N     Max in-flight requests (default: 10)
-  --reporting-api=F   Fraction sent as Reporting API vs legacy format (default: 0.3)
-  --dry-run           Print sample payloads instead of sending requests
-  --help              Show this message
+  --url=URL             Ingestion endpoint (default: https://csp.greg.cy/csp-report)
+  --host=HOST           Hostname for document-uri (default: localhost) - must match
+                         an active Site's registered domain exactly
+  --hits=N              Monthly page-hit volume to base the simulation on (default: 500000)
+  --report-rate=F       Fraction of hits producing a report, 0-1 (default: 0.02)
+  --minutes=N           Compress the simulated window into this many minutes (default: 15)
+  --concurrency=N       Max in-flight requests (default: 10)
+  --reporting-api=F     Fraction sent as Reporting API vs legacy format (default: 0.3)
+  --peak-hour           Simulate one busy hour's worth of traffic instead of a whole month
+  --peak-factor=F       Peak hour's multiple of the flat hourly average (default: 2.0)
+  --days-per-month=N    Days/month used to derive the flat hourly average (default: 30)
+  --dry-run             Print sample payloads instead of sending requests
+  --help                Show this message
 
 TXT
     );
@@ -51,7 +65,8 @@ TXT
 
 $options = getopt('', [
     'url::', 'host::', 'hits::', 'report-rate::', 'minutes::',
-    'concurrency::', 'reporting-api::', 'dry-run', 'help',
+    'concurrency::', 'reporting-api::', 'peak-hour', 'peak-factor::',
+    'days-per-month::', 'dry-run', 'help',
 ]);
 
 if (isset($options['help'])) {
@@ -65,9 +80,19 @@ $reportRate = (float) ($options['report-rate'] ?? 0.02);
 $minutes = (float) ($options['minutes'] ?? 15);
 $concurrency = max(1, (int) ($options['concurrency'] ?? 10));
 $reportingApiFraction = (float) ($options['reporting-api'] ?? 0.3);
+$peakHour = isset($options['peak-hour']);
+$peakFactor = (float) ($options['peak-factor'] ?? 2.0);
+$daysPerMonth = (float) ($options['days-per-month'] ?? 30);
 $dryRun = isset($options['dry-run']);
 
-$totalReports = max(1, (int) round($hits * $reportRate));
+if ($peakHour) {
+    $avgHourlyHits = $hits / ($daysPerMonth * 24);
+    $peakHourHits = $avgHourlyHits * $peakFactor;
+    $totalReports = max(1, (int) round($peakHourHits * $reportRate));
+} else {
+    $totalReports = max(1, (int) round($hits * $reportRate));
+}
+
 $durationSeconds = max(1.0, $minutes * 60);
 
 $policy = "default-src 'self'; script-src 'self' https://www.google-analytics.com https://connect.facebook.net; "
@@ -252,17 +277,33 @@ if ($dryRun) {
     exit(0);
 }
 
-fwrite(STDERR, sprintf(
-    "Simulating %s hits/month at a %.1f%% report rate = %s reports, compressed into %.1f minute(s) (~%.2f req/s avg), concurrency=%d\nTarget: %s (host=%s)\n\n",
-    number_format($hits),
-    $reportRate * 100,
-    number_format($totalReports),
-    $minutes,
-    $totalReports / $durationSeconds,
-    $concurrency,
-    $url,
-    $host,
-));
+if ($peakHour) {
+    fwrite(STDERR, sprintf(
+        "Simulating a peak hour (%.1fx the flat hourly average of %s hits/month over %.0f days) at a %.1f%% report rate = %s reports, compressed into %.1f minute(s) (~%.2f req/s avg), concurrency=%d\nTarget: %s (host=%s)\n\n",
+        $peakFactor,
+        number_format($hits),
+        $daysPerMonth,
+        $reportRate * 100,
+        number_format($totalReports),
+        $minutes,
+        $totalReports / $durationSeconds,
+        $concurrency,
+        $url,
+        $host,
+    ));
+} else {
+    fwrite(STDERR, sprintf(
+        "Simulating %s hits/month at a %.1f%% report rate = %s reports, compressed into %.1f minute(s) (~%.2f req/s avg), concurrency=%d\nTarget: %s (host=%s)\n\n",
+        number_format($hits),
+        $reportRate * 100,
+        number_format($totalReports),
+        $minutes,
+        $totalReports / $durationSeconds,
+        $concurrency,
+        $url,
+        $host,
+    ));
+}
 
 $mean = $durationSeconds / $totalReports;
 $multi = curl_multi_init();
